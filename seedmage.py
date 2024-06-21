@@ -3,28 +3,29 @@
 Fake torrent seeder
 '''
 
-import argparse
 import random
 import time
 import sys
 import signal
 import requests
+import threading
+import glob
+import concurrent.futures
 
 import torrent
 import utils
 
 def print_wip(text):
-  print(text + "...", end='', flush=True)
-
+    print(text, end='', flush=True)
 
 def print_info(text):
-  print("\033[33m" + text + "\033[0m")
+    print("\033[33m" + text + "\033[0m")
 
 def print_success(text):
-  print("\033[32m" + text + "\033[0m")
+    print("\033[32m" + text + "\033[0m")
 
 def print_error(text):
-  print("\033[31m" + text + "\033[0m")
+    print("\033[31m" + text + "\033[0m")
 
 def signal_handler(sig, frame):
     print_error("\nClosing SeedMage right now!")
@@ -40,59 +41,68 @@ print(r'''
 --__   "--_____--"   __--
     """--_______--"""
 ''')
-
-parser = argparse.ArgumentParser()
-parser.add_argument("torrent_file", help="example.torrent")
-parser.add_argument("upload_speed", help="Upload speed in kB/s", type=int)
-parser.add_argument("--update-interval", help="Upload interval in seconds", 
-    type=int)
-args = parser.parse_args()
-
 signal.signal(signal.SIGINT, signal_handler)
 
-# Torrent general information
-torrent_file = torrent.File(args.torrent_file)
-print_info("Torrent:")
-print(torrent_file)
+def torrent_exec(path, total_uploaded, lock):
+    # Torrent general information
+    torrent_file = torrent.File(path)
 
-# Requesting seeder information to the tracker
-seeder = torrent.Seeder(torrent_file)
-while True:
-  print_wip("Requesting seeder information")
-  try:
-    seeder.load_peers()
-    print_success("done")
-    break
-  except requests.exceptions.Timeout:
-    print_error("timeout")
+    # Requesting seeder information to the tracker
+    seeder = torrent.Seeder(torrent_file)
+    while True:
+        try:
+            seeder.load_peers()
+            break
+        except requests.exceptions.Timeout:
+            print_error("timeout")
 
-print_info("Seeder:")
-print(seeder)
+    # Calculate a few parameters
+    seed_per_second = 10000 * 1024
+    update_interval = 3
+    total_up = 0
+    # Seeding
+    while True:
+        time.sleep(update_interval)
+        uploaded_bytes = seed_per_second * update_interval
+        uploaded_bytes = int(uploaded_bytes * random.uniform(0.8, 1.2))  # +- 20%
 
-# Calculate a few parameters
-seed_per_second = args.upload_speed * 1024
-update_interval = seeder.update_interval
-if args.update_interval: 
-  # override the update_interval given by the server
-  update_interval = args.update_interval 
+        with lock:
+            total_uploaded[0] += uploaded_bytes
+            total_up += uploaded_bytes
 
-# Seeding
-print_info("\nStarting seeding at %s/s" % utils.sizeof_fmt(seed_per_second))
-total_uploaded = 0
-while True:
-  print_wip("Waiting %d seconds" % update_interval)
-  time.sleep(update_interval)
-  print_success("done")
+        while True:
+            try:
+                seeder.upload(total_up)
+                break
+            except requests.exceptions.Timeout:
+                print_error("timeout")
 
-  uploaded_bytes = seed_per_second * update_interval
-  uploaded_bytes = int(uploaded_bytes * random.uniform(0.8, 1.2)) # +- 20%
-  total_uploaded += uploaded_bytes
+def print_total_uploaded(total_uploaded, lock, stop_event):
+    while not stop_event.is_set():
+        time.sleep(5)
+        with lock:
+            print_success(f"Total uploaded: {utils.sizeof_fmt(total_uploaded[0])}")
 
-  while True:
-    print_wip("Uploading %s" % utils.sizeof_fmt(uploaded_bytes))
+def main():
+    total_uploaded = [0]
+    lock = threading.Lock()
+    stop_event = threading.Event()
+
+    printer_thread = threading.Thread(target=print_total_uploaded, args=(total_uploaded, lock, stop_event))
+    printer_thread.start()
+    
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        for x in glob.glob('torrent/*.torrent'):
+            print(x)
+            executor.submit(torrent_exec, x, total_uploaded, lock)
+
     try:
-      seeder.upload(total_uploaded)
-      print_success("uploaded")
-      break
-    except requests.exceptions.Timeout:
-      print_error("timeout")
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print_error("\nStopping threads...")
+        stop_event.set()
+        printer_thread.join()
+
+if __name__ == '__main__':
+    main()
