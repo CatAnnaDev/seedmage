@@ -3,6 +3,7 @@
 Fake torrent seeder
 '''
 
+import argparse
 import random
 import time
 import sys
@@ -15,12 +16,6 @@ import concurrent.futures
 import torrent
 import utils
 
-def print_wip(text):
-    print(text, end='', flush=True)
-
-def print_info(text):
-    print("\033[33m" + text + "\033[0m")
-
 def print_success(text):
     print("\033[32m" + text + "\033[0m")
 
@@ -28,8 +23,8 @@ def print_error(text):
     print("\033[31m" + text + "\033[0m")
 
 def signal_handler(sig, frame):
-    print_error("\nClosing SeedMage right now!")
-    sys.exit(0)
+    print_error("\nClosing SeedMage right now! wait next cycle")
+    stop_event.set()  # Set the event to stop the printer thread
 
 print(r'''
             .
@@ -41,9 +36,15 @@ print(r'''
 --__   "--_____--"   __--
     """--_______--"""
 ''')
-signal.signal(signal.SIGINT, signal_handler)
 
-def torrent_exec(path, total_uploaded, lock):
+parser = argparse.ArgumentParser()
+parser.add_argument("upload_speed", help="Upload speed in kB/s", type=int)
+parser.add_argument("--update-interval", help="Upload interval in seconds", type=int)
+args = parser.parse_args()
+
+#signal.signal(signal.SIGINT, signal_handler)
+
+def torrent_exec(path, total_uploaded, lock, stop_event):
     # Torrent general information
     torrent_file = torrent.File(path)
 
@@ -57,11 +58,11 @@ def torrent_exec(path, total_uploaded, lock):
             print_error("timeout")
 
     # Calculate a few parameters
-    seed_per_second = 10000 * 1024
-    update_interval = 3
+    seed_per_second = args.upload_speed * 1024
+    update_interval = args.update_interval
     total_up = 0
     # Seeding
-    while True:
+    while not stop_event.is_set():
         time.sleep(update_interval)
         uploaded_bytes = seed_per_second * update_interval
         uploaded_bytes = int(uploaded_bytes * random.uniform(0.8, 1.2))  # +- 20%
@@ -84,25 +85,21 @@ def print_total_uploaded(total_uploaded, lock, stop_event):
             print_success(f"Total uploaded: {utils.sizeof_fmt(total_uploaded[0])}")
 
 def main():
-    total_uploaded = [0]
-    lock = threading.Lock()
-    stop_event = threading.Event()
+  global stop_event
+  total_uploaded = [0]
+  lock = threading.Lock()
+  stop_event = threading.Event()
+  signal.signal(signal.SIGINT, signal_handler)
+  printer_thread = threading.Thread(target=print_total_uploaded, args=(total_uploaded, lock, stop_event))
+  printer_thread.start()
+  
+  with concurrent.futures.ThreadPoolExecutor() as executor:
+      for x in glob.glob('torrent/*.torrent'):
+          print(x)
+          executor.submit(torrent_exec, x, total_uploaded, lock, stop_event)
 
-    printer_thread = threading.Thread(target=print_total_uploaded, args=(total_uploaded, lock, stop_event))
-    printer_thread.start()
-    
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        for x in glob.glob('torrent/*.torrent'):
-            print(x)
-            executor.submit(torrent_exec, x, total_uploaded, lock)
 
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        print_error("\nStopping threads...")
-        stop_event.set()
-        printer_thread.join()
+  printer_thread.join()
 
 if __name__ == '__main__':
     main()
